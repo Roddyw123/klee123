@@ -482,6 +482,27 @@ void klee_make_symbolic(void *addr, size_t nbytes, const char *name) {
   }
 }
 
+void klee_make_symbolic_bytes(void *addr, size_t nbytes, const char *name,
+                              const unsigned char *mask, size_t mask_len) {
+  if (obj_index >= input->numObjects) {
+      __emit_error("ran out of appropriate inputs");
+  } else {
+    KTestObject *boo = &input->objects[obj_index];
+    if (boo->numBytes != nbytes) {
+      fprintf(stderr, "KLEE-REPLAY: ERROR: make_symbolic_bytes mismatch, different sizes: "
+              "%d in input file, %lu in code\n", boo->numBytes, (unsigned long)nbytes);
+      exit(1);
+    } else {
+      /* Only copy masked (symbolic) bytes — preserve concrete values */
+      size_t i;
+      size_t copy_len = nbytes < mask_len ? nbytes : mask_len;
+      for (i = 0; i < copy_len; i++)
+        if (mask[i]) ((char *)addr)[i] = boo->bytes[i];
+      obj_index++;
+    }
+  }
+}
+
 /* Redefined here so that we can check the value read. */
 int klee_range(int start, int end, const char* name) {
   int r;

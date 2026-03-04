@@ -95,7 +95,10 @@ void klee_init_env(int *argcPtr, char ***argvPtr) {
   char sym_arg_name[6] = "arg";
   unsigned sym_arg_num = 0;
   int k = 0, i;
-
+  char *template_stdin_path = 0;
+  char *template_file_paths[26];
+  unsigned n_template_files = 0;
+  char sym_marker = '?';
   sym_arg_name[5] = '\0';
 
   // Recognize --help when it is the sole argument.
@@ -114,7 +117,15 @@ usage: (klee_init_env) [options] [program arguments]\n\
                               writes exceeding the initial file size are discarded.\n\
                               Note: file offset is always incremented.\n\
   -max-fail <N>             - Allow up to N injected failures\n\
-  -fd-fail                  - Shortcut for '-max-fail 1'\n\n");
+  -fd-fail                  - Shortcut for '-max-fail 1'\n\
+  -sym-template-stdin <file> - Use <file> as a template for stdin.\n\
+                              Marker bytes (default '?') become symbolic;\n\
+                              all other bytes stay concrete.\n\
+  -sym-template-file <file>  - Use <file> as a template for a named\n\
+                              symbolic file (A, B, C, ...). Repeatable.\n\
+  -sym-marker <char>         - Set the template marker character\n\
+                              (default: '?').\n\n"
+);
   }
 
   while (k < argc) {
@@ -214,11 +225,49 @@ usage: (klee_init_env) [options] [program arguments]\n\
         __emit_error(msg);
 
       fd_fail = __str_to_int(argv[k++], msg);
+    } else if (__streq(argv[k], "--sym-template-stdin") || __streq(argv[k], "-sym-template-stdin")) {
+      const char *msg =
+        "--sym-template-stdin expects one argument <template-path>";
+      if (++k == argc)
+        __emit_error(msg);
+      if (template_stdin_path)
+        __emit_error("Multiple --sym-template-stdin are not allowed.\n");
+
+      template_stdin_path = argv[k++];
+    } else if (__streq(argv[k], "--sym-template-file") ||
+               __streq(argv[k], "-sym-template-file")) {
+      const char *msg =
+          "--sym-template-file expects one argument <template-path>";
+      if (++k == argc)
+        __emit_error(msg);
+
+      if (n_template_files >= 26)
+        __emit_error("No more than 26 symbolic template files allowed.\n");
+
+      template_file_paths[n_template_files++] = argv[k++];
+    } else if (__streq(argv[k], "--sym-marker") ||
+               __streq(argv[k], "-sym-marker")) {
+      const char *msg =
+          "--sym-marker expects one single-character argument";
+      if (++k == argc)
+        __emit_error(msg);
+
+      if (argv[k][0] == '\0' || argv[k][1] != '\0')
+        __emit_error(msg);
+
+      sym_marker = argv[k++][0];
     } else {
       /* simply copy arguments */
       __add_arg(&new_argc, new_argv, argv[k++], 1024);
     }
   }
+
+  /* Template options conflict with non-template counterparts */
+  if (template_stdin_path && sym_stdin_len)
+    __emit_error("--sym-template-stdin and --sym-stdin cannot be used together.\n");
+
+  if (n_template_files && sym_files)
+    __emit_error("--sym-template-file and --sym-files cannot be used together.\n");
 
   final_argv = (char **)malloc((new_argc + 1) * sizeof(*final_argv));
   if (!final_argv)
@@ -232,6 +281,60 @@ usage: (klee_init_env) [options] [program arguments]\n\
 
   klee_init_fds(sym_files, sym_file_len, sym_stdin_len, sym_stdout_flag,
                 save_all_writes_flag, fd_fail);
+  /* --- Template file processing --- */
+  /* Must happen AFTER klee_init_fds() because it initializes __exe_fs
+     and __exe_env. When templates are used, klee_init_fds() is called
+     with sym_files=0 and sym_stdin_len=0 (conflict checks ensure this),
+     so it creates no sym_files/sym_stdin — we fill those in here. */
+
+  if (n_template_files > 0) {
+    struct stat64 tpl_stat;
+    stat64(".", &tpl_stat);
+
+    __exe_fs.n_sym_files = n_template_files;
+    __exe_fs.sym_files = malloc(sizeof(*__exe_fs.sym_files) * n_template_files);
+    if (!__exe_fs.sym_files)
+      klee_report_error(__FILE__, __LINE__,
+                        "out of memory in klee_init_env", "user.err");
+
+    unsigned k_tf;
+    for (k_tf = 0; k_tf < n_template_files; k_tf++) {
+      unsigned tpl_size = 0;
+      char *tpl_data = __read_concrete_file(template_file_paths[k_tf],
+                                            &tpl_size);
+      if (!tpl_data)
+        __emit_error("Failed to read template file.\n");
+
+      char tname[7] = "?_data";
+      tname[0] = 'A' + k_tf;
+
+      __create_mixed_dfile(&__exe_fs.sym_files[k_tf],
+                           tpl_data, tpl_size,
+                           tname, sym_marker, &tpl_stat);
+      free(tpl_data);
+    }
+  }
+
+  if (template_stdin_path) {
+    struct stat64 tpl_stat;
+    stat64(".", &tpl_stat);
+
+    unsigned tpl_size = 0;
+    char *tpl_data = __read_concrete_file(template_stdin_path, &tpl_size);
+    if (!tpl_data)
+      __emit_error("Failed to read template file for stdin.\n");
+
+    __exe_fs.sym_stdin = malloc(sizeof(*__exe_fs.sym_stdin));
+    if (!__exe_fs.sym_stdin)
+      klee_report_error(__FILE__, __LINE__,
+                        "out of memory in klee_init_env", "user.err");
+
+    __create_mixed_dfile(__exe_fs.sym_stdin,
+                         tpl_data, tpl_size,
+                         "stdin", sym_marker, &tpl_stat);
+    __exe_env.fds[0].dfile = __exe_fs.sym_stdin;
+    free(tpl_data);
+  }
 }
 
 /* The following function represents the main function of the user application

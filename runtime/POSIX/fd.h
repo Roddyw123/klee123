@@ -108,6 +108,14 @@ void klee_init_fds(unsigned n_files, unsigned file_length,
                    int do_all_writes_flag, unsigned max_failures);
 void klee_init_env(int *argcPtr, char ***argvPtr);
 
+char *__read_concrete_file(const char *path, unsigned *out_size);
+void __create_mixed_dfile(exe_disk_file_t *dfile,
+                          const char *template_data,
+                          unsigned template_size,
+                          const char *name,
+                          char marker,
+                          struct stat64 *defaults);
+
 /* *** */
 
 int __fd_open(const char *pathname, int flags, mode_t mode);
