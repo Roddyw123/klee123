@@ -127,6 +127,86 @@ void klee_make_symbolic(void *array, size_t nbytes, const char *name) {
   }
 }
 
+void klee_make_symbolic_bytes(void *array, size_t nbytes, const char *name,
+                              const unsigned char *mask, size_t mask_len) {
+  if (!name)
+    name = "unnamed";
+
+  static int rand_init = -1;
+  if (rand_init == -1) {
+    if (getenv("KLEE_RANDOM")) {
+      struct timeval tv;
+      gettimeofday(&tv, 0);
+      rand_init = 1;
+      srand(tv.tv_sec ^ tv.tv_usec);
+    } else {
+      rand_init = 0;
+    }
+  }
+
+  if (rand_init) {
+    char *c = array;
+    size_t i;
+    for (i = 0; i < nbytes && i < mask_len; i++)
+      if (mask[i]) c[i] = rand_byte();
+    return;
+  }
+
+  if (!testData) {
+    char tmp[256];
+    char *fname = getenv("KTEST_FILE");
+    if (!fname) {
+      fprintf(stdout, "KLEE-RUNTIME: KTEST_FILE not set, please enter .ktest path: ");
+      fflush(stdout);
+      fname = tmp;
+      if (!fgets(tmp, sizeof tmp, stdin) || !strlen(tmp)) {
+        fprintf(stderr, "KLEE-RUNTIME: cannot replay, no KTEST_FILE or user input\n");
+        exit(1);
+      }
+      tmp[strlen(tmp) - 1] = '\0';
+    }
+    testData = kTest_fromFile(fname);
+    if (!testData) {
+      fprintf(stderr, "KLEE-RUNTIME: unable to open .ktest file\n");
+      exit(1);
+    }
+  }
+
+  for (;; ++testPosition) {
+    if (testPosition >= testData->numObjects) {
+      report_internal_error("out of inputs. Will use zero if continuing.");
+      size_t i;
+      for (i = 0; i < nbytes && i < mask_len; i++)
+        if (mask[i]) ((char *)array)[i] = 0;
+      break;
+    } else {
+      KTestObject *o = &testData->objects[testPosition];
+      if (strcmp(name, o->name) != 0)
+        report_internal_error(
+            "object name mismatch. Requesting \"%s\" but returning \"%s\"",
+            name, o->name);
+      /* Only copy masked (symbolic) bytes — preserve concrete values */
+      {
+        size_t copy_len = nbytes < o->numBytes ? nbytes : o->numBytes;
+        size_t ci;
+        for (ci = 0; ci < copy_len && ci < mask_len; ci++)
+          if (mask[ci]) ((char *)array)[ci] = o->bytes[ci];
+      }
+      if (nbytes != o->numBytes) {
+        report_internal_error("object sizes differ. Expected %zu but got %u",
+                              nbytes, o->numBytes);
+        if (o->numBytes < nbytes) {
+          size_t zi;
+          for (zi = o->numBytes; zi < nbytes && zi < mask_len; zi++)
+            if (mask[zi]) ((char *)array)[zi] = 0;
+        }
+      }
+      ++testPosition;
+      break;
+    }
+  }
+}
+
 void klee_silent_exit(int x) { exit(x); }
 
 uintptr_t klee_choose(uintptr_t n) {

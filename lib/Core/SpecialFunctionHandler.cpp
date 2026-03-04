@@ -109,6 +109,7 @@ static constexpr std::array handlerInfo = {
 #endif
   add("klee_is_symbolic", handleIsSymbolic, true),
   add("klee_make_symbolic", handleMakeSymbolic, false),
+  add("klee_make_symbolic_bytes", handleMakeSymbolicBytes, false),
   add("klee_mark_global", handleMarkGlobal, false),
   add("klee_open_merge", handleOpenMerge, false),
   add("klee_close_merge", handleCloseMerge, false),
@@ -824,6 +825,141 @@ void SpecialFunctionHandler::handleMakeSymbolic(ExecutionState &state,
     }
   }
 }
+
+void SpecialFunctionHandler::handleMakeSymbolicBytes(
+    ExecutionState &state,
+    KInstruction *target,
+    std::vector<ref<Expr>> &arguments) {
+
+  // Validate: expect 5 arguments
+  // (void *addr, size_t nbytes, const char *name,
+  //  const unsigned char *mask, size_t mask_len)
+  if (arguments.size() != 5) {
+    executor.terminateStateOnUserError(
+        state,
+        "Incorrect number of arguments to klee_make_symbolic_bytes"
+        "(void*, size_t, char*, unsigned char*, size_t)");
+    return;
+  }
+
+  // Read the name string from the program's memory
+  std::string name = arguments[2]->isZero()
+                         ? "" : readStringAtAddress(state, arguments[2]);
+  if (name.length() == 0) {
+    name = "unnamed";
+    klee_warning("klee_make_symbolic_bytes: renamed empty name to \"unnamed\"");
+  }
+
+  // Resolve addr (argument 0) to MemoryObject(s)
+  Executor::ExactResolutionList rl;
+  executor.resolveExact(state, arguments[0], rl, "make_symbolic_bytes");
+
+  for (Executor::ExactResolutionList::iterator it = rl.begin(),
+       ie = rl.end(); it != ie; ++it) {
+    const MemoryObject *mo = it->first.first;
+    mo->setName(name);
+    const ObjectState *old = it->first.second;
+    ExecutionState *s = it->second;
+
+    if (old->readOnly) {
+      executor.terminateStateOnUserError(
+          *s, "cannot make readonly object symbolic");
+      return;
+    }
+
+    // Verify nbytes == mo->size
+    bool res;
+    bool success __attribute__((unused)) = executor.solver->mustBeTrue(
+        s->constraints,
+        EqExpr::create(
+            ZExtExpr::create(arguments[1], Context::get().getPointerWidth()),
+            mo->getSizeExpr()),
+        res, s->queryMetaData);
+    assert(success && "FIXME: Unhandled solver failure");
+    if (!res) {
+      executor.terminateStateOnUserError(
+          *s, "Wrong size given to klee_make_symbolic_bytes");
+      continue;
+    }
+
+    // Verify mask_len == nbytes
+    bool maskRes;
+    bool maskSuccess __attribute__((unused)) = executor.solver->mustBeTrue(
+        s->constraints,
+        EqExpr::create(
+            ZExtExpr::create(arguments[4], Context::get().getPointerWidth()),
+            ZExtExpr::create(arguments[1], Context::get().getPointerWidth())),
+        maskRes, s->queryMetaData);
+    assert(maskSuccess && "FIXME: Unhandled solver failure");
+    if (!maskRes) {
+      executor.terminateStateOnUserError(
+          *s, "mask_len must equal nbytes in klee_make_symbolic_bytes");
+      continue;
+    }
+
+    // Resolve the mask pointer (argument 3) to read mask bytes
+    ObjectPair maskOp;
+    ref<Expr> maskAddr = executor.toUnique(*s, arguments[3]);
+    if (!isa<ConstantExpr>(maskAddr)) {
+      executor.terminateStateOnUserError(
+          *s, "symbolic mask pointer in klee_make_symbolic_bytes");
+      continue;
+    }
+    if (!s->addressSpace.resolveOne(cast<ConstantExpr>(maskAddr), maskOp)) {
+      executor.terminateStateOnUserError(
+          *s, "invalid mask pointer in klee_make_symbolic_bytes");
+      continue;
+    }
+    const ObjectState *maskOs = maskOp.second;
+    const MemoryObject *maskMo = maskOp.first;
+    size_t maskOffset =
+        cast<ConstantExpr>(maskMo->getOffsetExpr(maskAddr))->getZExtValue();
+
+    // Create the symbolic array
+    if (mo->size > UINT32_MAX) {
+      executor.terminateStateOnExecError(
+          *s, "Object too large for klee_make_symbolic_bytes");
+      continue;
+    }
+    unsigned id = 0;
+    std::string uniqueName = name;
+    while (!s->arrayNames.insert(uniqueName).second)
+      uniqueName = name + "_" + llvm::utostr(++id);
+    const Array *array =
+        executor.arrayCache.CreateArray(uniqueName, mo->size);
+
+    // Get writable ObjectState (handles copy-on-write)
+    ObjectState *wos = s->addressSpace.getWriteable(mo, old);
+
+    // Selectively write symbolic bytes based on the mask
+    for (size_t i = 0; i < mo->size; i++) {
+      ref<Expr> maskByte = maskOs->read8(maskOffset + i);
+      ref<ConstantExpr> maskVal = dyn_cast<ConstantExpr>(maskByte);
+
+      if (maskVal && maskVal->getZExtValue(8) != 0) {
+        // Symbolic: write ReadExpr(array, i) into this byte
+        ref<Expr> symByte = ReadExpr::create(
+            UpdateList(array, nullptr),
+            ConstantExpr::create(i, Expr::Int32));
+        wos->write(i, symByte);
+      } else {
+        // Concrete byte: constrain array[i] == original value so that
+        // .ktest files record the correct concrete data for replay.
+        // Without this, the solver would assign arbitrary values to
+        // array elements that have no symbolic constraints.
+        ref<Expr> concreteVal = wos->read8(i);
+        ref<Expr> arrayByte = ReadExpr::create(
+            UpdateList(array, nullptr),
+            ConstantExpr::create(i, Expr::Int32));
+        executor.addConstraint(*s, EqExpr::create(arrayByte, concreteVal));
+      }
+    }
+
+    // Register for test case generation
+    s->addSymbolic(mo, array);
+  }
+}
+
 
 void SpecialFunctionHandler::handleMarkGlobal(ExecutionState &state,
                                               KInstruction *target,

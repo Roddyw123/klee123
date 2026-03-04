@@ -119,6 +119,7 @@ namespace klee {
     HANDLER(handleUnderConstrained);
     HANDLER(handleWarning);
     HANDLER(handleWarningOnce);
+    HANDLER(handleMakeSymbolicBytes);
 #undef HANDLER
   };
 } // End klee namespace

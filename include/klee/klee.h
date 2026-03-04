@@ -36,6 +36,19 @@ extern "C" {
    */
   void klee_make_symbolic(void *addr, size_t nbytes, const char *name);
 
+  /* klee_make_symbolic_bytes - Make specific bytes of an object symbolic.
+   * Bytes where mask[i] != 0 become symbolic; bytes where mask[i] == 0
+   * retain their current concrete value.
+   *
+   * \arg addr      - The start of the memory object.
+   * \arg nbytes    - The total number of bytes in the object.
+   * \arg name      - A name for identifying the object in messages/output.
+   * \arg mask      - A byte array of length mask_len. mask[i] != 0 means
+   *                  byte i should be made symbolic.
+   * \arg mask_len  - Must equal nbytes. Safety check.
+   */
+  void klee_make_symbolic_bytes(void *addr, size_t nbytes, const char *name,
+                                const unsigned char *mask, size_t mask_len);
   /* klee_range - Construct a symbolic value in the signed interval
    * [begin,end).
    *
