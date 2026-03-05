@@ -98,6 +98,9 @@ void klee_init_env(int *argcPtr, char ***argvPtr) {
   char *template_stdin_path = 0;
   char *template_file_paths[26];
   unsigned n_template_files = 0;
+  char *hex_template_stdin_path = 0;
+  char *hex_template_file_paths[26];
+  unsigned n_hex_template_files = 0;
   char sym_marker = '?';
   sym_arg_name[5] = '\0';
 
@@ -128,7 +131,15 @@ usage: (klee_init_env) [options] [program arguments]\n\
                               Template markers support constraints:\n\
                               ?{alpha}, ?{digit}, ?{alnum}, ?{print},\n\
                               ?{upper}, ?{lower}, ?{hex}, ?{space}, ?{any},\n\
-                              ?{range:X-Y}, ?{set:abc}\n\n"
+                              ?{range:X-Y}, ?{set:abc}\n\
+  -sym-hex-template-stdin <file>\n\
+                              - Use <file> as a hex template for stdin.\n\
+                              Format: hex pairs (e.g. 'FF 00'), ?? for\n\
+                              symbolic, ?{constraint} for constrained,\n\
+                              # for comments. Whitespace is ignored.\n\
+  -sym-hex-template-file <file>\n\
+                              - Use <file> as a hex template for a named\n\
+                              symbolic file (A, B, C, ...). Repeatable.\n\n"
 );
   }
 
@@ -260,6 +271,27 @@ usage: (klee_init_env) [options] [program arguments]\n\
         __emit_error(msg);
 
       sym_marker = argv[k++][0];
+    } else if (__streq(argv[k], "--sym-hex-template-stdin") ||
+               __streq(argv[k], "-sym-hex-template-stdin")) {
+      const char *msg =
+        "--sym-hex-template-stdin expects one argument <hex-template-path>";
+      if (++k == argc)
+        __emit_error(msg);
+      if (hex_template_stdin_path)
+        __emit_error("Multiple --sym-hex-template-stdin are not allowed.\n");
+
+      hex_template_stdin_path = argv[k++];
+    } else if (__streq(argv[k], "--sym-hex-template-file") ||
+               __streq(argv[k], "-sym-hex-template-file")) {
+      const char *msg =
+        "--sym-hex-template-file expects one argument <hex-template-path>";
+      if (++k == argc)
+        __emit_error(msg);
+
+      if (n_hex_template_files >= 26)
+        __emit_error("No more than 26 symbolic hex template files allowed.\n");
+
+      hex_template_file_paths[n_hex_template_files++] = argv[k++];
     } else {
       /* simply copy arguments */
       __add_arg(&new_argc, new_argv, argv[k++], 1024);
@@ -272,6 +304,18 @@ usage: (klee_init_env) [options] [program arguments]\n\
 
   if (n_template_files && sym_files)
     __emit_error("--sym-template-file and --sym-files cannot be used together.\n");
+
+  if (hex_template_stdin_path && sym_stdin_len)
+    __emit_error("--sym-hex-template-stdin and --sym-stdin cannot be used together.\n");
+
+  if (hex_template_stdin_path && template_stdin_path)
+    __emit_error("--sym-hex-template-stdin and --sym-template-stdin cannot be used together.\n");
+
+  if (n_hex_template_files && sym_files)
+    __emit_error("--sym-hex-template-file and --sym-files cannot be used together.\n");
+
+  if (n_hex_template_files && n_template_files)
+    __emit_error("--sym-hex-template-file and --sym-template-file cannot be used together.\n");
 
   final_argv = (char **)malloc((new_argc + 1) * sizeof(*final_argv));
   if (!final_argv)
@@ -336,6 +380,56 @@ usage: (klee_init_env) [options] [program arguments]\n\
     __create_mixed_dfile(__exe_fs.sym_stdin,
                          tpl_data, tpl_size,
                          "stdin", sym_marker, &tpl_stat);
+    __exe_env.fds[0].dfile = __exe_fs.sym_stdin;
+    free(tpl_data);
+  }
+
+  /* --- Hex template file processing --- */
+  if (n_hex_template_files > 0) {
+    struct stat64 tpl_stat;
+    stat64(".", &tpl_stat);
+
+    __exe_fs.n_sym_files = n_hex_template_files;
+    __exe_fs.sym_files = malloc(sizeof(*__exe_fs.sym_files) * n_hex_template_files);
+    if (!__exe_fs.sym_files)
+      klee_report_error(__FILE__, __LINE__,
+                        "out of memory in klee_init_env", "user.err");
+
+    unsigned k_hf;
+    for (k_hf = 0; k_hf < n_hex_template_files; k_hf++) {
+      unsigned tpl_size = 0;
+      char *tpl_data = __read_concrete_file(hex_template_file_paths[k_hf],
+                                            &tpl_size);
+      if (!tpl_data)
+        __emit_error("Failed to read hex template file.\n");
+
+      char tname[7] = "?_data";
+      tname[0] = 'A' + k_hf;
+
+      __create_hex_dfile(&__exe_fs.sym_files[k_hf],
+                         tpl_data, tpl_size,
+                         tname, &tpl_stat);
+      free(tpl_data);
+    }
+  }
+
+  if (hex_template_stdin_path) {
+    struct stat64 tpl_stat;
+    stat64(".", &tpl_stat);
+
+    unsigned tpl_size = 0;
+    char *tpl_data = __read_concrete_file(hex_template_stdin_path, &tpl_size);
+    if (!tpl_data)
+      __emit_error("Failed to read hex template file for stdin.\n");
+
+    __exe_fs.sym_stdin = malloc(sizeof(*__exe_fs.sym_stdin));
+    if (!__exe_fs.sym_stdin)
+      klee_report_error(__FILE__, __LINE__,
+                        "out of memory in klee_init_env", "user.err");
+
+    __create_hex_dfile(__exe_fs.sym_stdin,
+                       tpl_data, tpl_size,
+                       "stdin", &tpl_stat);
     __exe_env.fds[0].dfile = __exe_fs.sym_stdin;
     free(tpl_data);
   }

@@ -42,60 +42,15 @@ exe_sym_env_t __exe_env = {
   0
 };
 
-static void __create_new_dfile(exe_disk_file_t *dfile, unsigned size, 
+static void __create_new_dfile(exe_disk_file_t *dfile, unsigned size,
                                const char *name, struct stat64 *defaults) {
-  struct stat64 *s = malloc(sizeof(*s));
-  if (!s)
-    klee_report_error(__FILE__, __LINE__, "out of memory in klee_init_env", "user.err");
-
-  const char *sp;
-  char sname[64];
-  for (sp=name; *sp; ++sp)
-    sname[sp-name] = *sp;
-  memcpy(&sname[sp-name], "_stat", 6);
-
   assert(size);
-
   dfile->size = size;
   dfile->contents = malloc(dfile->size);
   if (!dfile->contents)
     klee_report_error(__FILE__, __LINE__, "out of memory in klee_init_env", "user.err");
   klee_make_symbolic(dfile->contents, dfile->size, name);
-  
-  klee_make_symbolic(s, sizeof(*s), sname);
-
-  /* For broken tests */
-  if (!klee_is_symbolic(s->st_ino) && 
-      (s->st_ino & 0x7FFFFFFF) == 0)
-    s->st_ino = defaults->st_ino;
-  
-  /* Important since we copy this out through getdents, and readdir
-     will otherwise skip this entry. For same reason need to make sure
-     it fits in low bits. */
-  klee_assume((s->st_ino & 0x7FFFFFFF) != 0);
-
-  /* uclibc opendir uses this as its buffer size, try to keep
-     reasonable. */
-  klee_assume((s->st_blksize & ~0xFFFF) == 0);
-
-  klee_prefer_cex(s, !(s->st_mode & ~(S_IFMT | 0777)));
-  klee_prefer_cex(s, s->st_dev == defaults->st_dev);
-  klee_prefer_cex(s, s->st_rdev == defaults->st_rdev);
-  klee_prefer_cex(s, (s->st_mode&0700) == 0600);
-  klee_prefer_cex(s, (s->st_mode&0070) == 0040);
-  klee_prefer_cex(s, (s->st_mode&0007) == 0004);
-  klee_prefer_cex(s, (s->st_mode&S_IFMT) == S_IFREG);
-  klee_prefer_cex(s, s->st_nlink == 1);
-  klee_prefer_cex(s, s->st_uid == defaults->st_uid);
-  klee_prefer_cex(s, s->st_gid == defaults->st_gid);
-  klee_prefer_cex(s, s->st_blksize == 4096);
-  klee_prefer_cex(s, s->st_atime == defaults->st_atime);
-  klee_prefer_cex(s, s->st_mtime == defaults->st_mtime);
-  klee_prefer_cex(s, s->st_ctime == defaults->st_ctime);
-
-  s->st_size = dfile->size;
-  s->st_blocks = 8;
-  dfile->stat = s;
+  __setup_dfile_stat(dfile, name, defaults);
 }
 
 /* Read a file from the real host filesystem using raw syscalls
@@ -136,6 +91,42 @@ char *__read_concrete_file(const char *path, unsigned *out_size) {
   return buf;
 }
 
+/* Set up the stat struct for a dfile
+  Shared by __create_new_dfile, __create_mixed_dfile, and __create_hex_dfile.
+  dfile->size and dfile->contents must already be set. */
+static void __setup_dfile_stat(exe_disk_file_t *dfile, const char *name, struct stat64 *defaults) {
+  struct stat64 *s = malloc(sizeof(*s));
+  if (!s)
+    klee_report_error(__FILE__, __LINE__, "out of memory in klee_init_env", "user.err");
+  const char *sp;
+  char sname[64];
+  for (sp = name; *sp; ++sp)
+    sname[sp - name] = *sp;
+  memcpy(&sname[sp - name], "_stat", 6);
+  klee_make_symbolic(s, sizeof(*s), sname);
+  if (!klee_is_symbolic(s->st_ino) && (s->st_ino & 0x7FFFFFFF) == 0)
+    s->st_ino = defaults->st_ino;
+  klee_assume((s->st_ino & 0x7FFFFFFF) != 0);
+  klee_assume((s->st_blksize & ~0xFFFF) == 0);
+  klee_prefer_cex(s, !(s->st_mode & ~(S_IFMT | 0777)));
+  klee_prefer_cex(s, s->st_dev == defaults->st_dev);
+  klee_prefer_cex(s, s->st_rdev == defaults->st_rdev);
+  klee_prefer_cex(s, (s->st_mode & 0700) == 0600);
+  klee_prefer_cex(s, (s->st_mode & 0070) == 0040);
+  klee_prefer_cex(s, (s->st_mode & 0007) == 0004);
+  klee_prefer_cex(s, (s->st_mode & S_IFMT) == S_IFREG);
+  klee_prefer_cex(s, s->st_nlink == 1);
+  klee_prefer_cex(s, s->st_uid == defaults->st_uid);
+  klee_prefer_cex(s, s->st_gid == defaults->st_gid);
+  klee_prefer_cex(s, s->st_blksize == 4096);
+  klee_prefer_cex(s, s->st_atime == defaults->st_atime);
+  klee_prefer_cex(s, s->st_mtime == defaults->st_mtime);
+  klee_prefer_cex(s, s->st_ctime == defaults->st_ctime);
+
+  s->st_size = dfile->size;
+  s->st_blocks = 8;
+  dfile->stat = s;
+}
 /* --- Constraint Markers Language --- */
 #define CONSTRAINT_NONE   0
 #define CONSTRAINT_ALPHA  1
@@ -372,46 +363,203 @@ void __create_mixed_dfile(exe_disk_file_t *dfile,
   free(mask);
   free(constraints);
 
-  /* --- Set up stat struct (same logic as __create_new_dfile) --- */
-  struct stat64 *s = malloc(sizeof(*s));
-  if (!s)
+  __setup_dfile_stat(dfile, name, defaults);
+}
+
+/* --- Hex Template Support (Objective 4) --- */
+
+static int __is_hex_digit(char c) {
+  return (c >= '0' && c <= '9') ||
+         (c >= 'a' && c <= 'f') ||
+         (c >= 'A' && c <= 'F');
+}
+
+static unsigned char __hex_val(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return 0;
+}
+
+/* Parse a hex template and create a dfile with mixed concrete/symbolic content.
+
+   Format:
+     FF 00 A3    - concrete bytes (hex pairs)
+     ??          - unconstrained symbolic byte
+     ?{digit}    - constrained symbolic byte (reuses Obj 3 constraint language)
+     # comment   - ignored to end of line
+     whitespace  - ignored between tokens
+
+   Reuses __parse_constraint and __apply_byte_constraint from Objective 3. */
+void __create_hex_dfile(exe_disk_file_t *dfile,
+                        const char *hex_data,
+                        unsigned hex_size,
+                        const char *name,
+                        struct stat64 *defaults) {
+  unsigned i, j, out_size;
+
+  if (hex_size == 0)
+    klee_report_error(__FILE__, __LINE__, "template file is empty", "user.err");
+
+  /* --- Pass 1: count output bytes --- */
+  out_size = 0;
+  i = 0;
+  while (i < hex_size) {
+    char c = hex_data[i];
+
+    /* Skip whitespace */
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+      i++;
+      continue;
+    }
+
+    /* Skip comments: # to end of line */
+    if (c == '#') {
+      while (i < hex_size && hex_data[i] != '\n') i++;
+      continue;
+    }
+
+    /* Hex pair: two hex digits -> 1 concrete byte */
+    if (__is_hex_digit(c)) {
+      if (i + 1 >= hex_size || !__is_hex_digit(hex_data[i + 1]))
+        klee_report_error(__FILE__, __LINE__,
+          "incomplete hex byte in hex template (expected two hex digits)",
+          "user.err");
+      i += 2;
+      out_size++;
+      continue;
+    }
+
+    /* Symbolic markers: ?? or ?{...} */
+    if (c == '?') {
+      if (i + 1 < hex_size && hex_data[i + 1] == '?') {
+        /* ?? -> unconstrained symbolic byte */
+        i += 2;
+        out_size++;
+        continue;
+      }
+      if (i + 1 < hex_size && hex_data[i + 1] == '{') {
+        /* ?{...} -> constrained symbolic byte */
+        unsigned end = i + 2;
+        while (end < hex_size && hex_data[end] != '}') end++;
+        if (end >= hex_size)
+          klee_report_error(__FILE__, __LINE__,
+            "malformed constraint in hex template (missing '}')",
+            "user.err");
+        i = end + 1;  /* skip past '}' */
+        out_size++;
+        continue;
+      }
+      /* Bare '?' -- error */
+      klee_report_error(__FILE__, __LINE__,
+        "bare '?' in hex template (use '??' for symbolic or '?{...}' for constrained)",
+        "user.err");
+    }
+
+    /* Invalid character */
+    klee_report_error(__FILE__, __LINE__,
+      "invalid character in hex template",
+      "user.err");
+  }
+
+  if (out_size == 0)
+    klee_report_error(__FILE__, __LINE__,
+      "hex template contains no bytes (only comments/whitespace)",
+      "user.err");
+
+  /* --- Allocate contents, mask, and constraints --- */
+  dfile->size = out_size;
+  dfile->contents = malloc(out_size);
+  if (!dfile->contents)
     klee_report_error(__FILE__, __LINE__, "out of memory in klee_init_env", "user.err");
 
-  const char *sp;
-  char sname[64];
-  for (sp = name; *sp; ++sp)
-    sname[sp - name] = *sp;
-  memcpy(&sname[sp - name], "_stat", 6);
+  unsigned char *mask = malloc(out_size);
+  if (!mask)
+    klee_report_error(__FILE__, __LINE__, "out of memory in klee_init_env", "user.err");
 
-  klee_make_symbolic(s, sizeof(*s), sname);
+  byte_constraint_t *constraints = malloc(out_size * sizeof(byte_constraint_t));
+  if (!constraints)
+    klee_report_error(__FILE__, __LINE__, "out of memory in klee_init_env", "user.err");
 
-  /* For broken tests */
-  if (!klee_is_symbolic(s->st_ino) &&
-      (s->st_ino & 0x7FFFFFFF) == 0)
-    s->st_ino = defaults->st_ino;
+  /* --- Pass 2: fill contents, mask, and constraints --- */
+  j = 0;
+  i = 0;
+  while (i < hex_size) {
+    char c = hex_data[i];
 
-  klee_assume((s->st_ino & 0x7FFFFFFF) != 0);
-  klee_assume((s->st_blksize & ~0xFFFF) == 0);
+    /* Skip whitespace */
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+      i++;
+      continue;
+    }
 
-  klee_prefer_cex(s, !(s->st_mode & ~(S_IFMT | 0777)));
-  klee_prefer_cex(s, s->st_dev == defaults->st_dev);
-  klee_prefer_cex(s, s->st_rdev == defaults->st_rdev);
-  klee_prefer_cex(s, (s->st_mode & 0700) == 0600);
-  klee_prefer_cex(s, (s->st_mode & 0070) == 0040);
-  klee_prefer_cex(s, (s->st_mode & 0007) == 0004);
-  klee_prefer_cex(s, (s->st_mode & S_IFMT) == S_IFREG);
-  klee_prefer_cex(s, s->st_nlink == 1);
-  klee_prefer_cex(s, s->st_uid == defaults->st_uid);
-  klee_prefer_cex(s, s->st_gid == defaults->st_gid);
-  klee_prefer_cex(s, s->st_blksize == 4096);
-  klee_prefer_cex(s, s->st_atime == defaults->st_atime);
-  klee_prefer_cex(s, s->st_mtime == defaults->st_mtime);
-  klee_prefer_cex(s, s->st_ctime == defaults->st_ctime);
+    /* Skip comments */
+    if (c == '#') {
+      while (i < hex_size && hex_data[i] != '\n') i++;
+      continue;
+    }
 
-  s->st_size = dfile->size;
-  s->st_blocks = 8;
-  dfile->stat = s;
+    /* Hex pair -> concrete byte */
+    if (__is_hex_digit(c)) {
+      dfile->contents[j] = (__hex_val(hex_data[i]) << 4) | __hex_val(hex_data[i + 1]);
+      mask[j] = 0;
+      constraints[j].type = CONSTRAINT_NONE;
+      i += 2;
+      j++;
+      continue;
+    }
+
+    /* ?? -> unconstrained symbolic */
+    if (c == '?' && i + 1 < hex_size && hex_data[i + 1] == '?') {
+      dfile->contents[j] = 0;
+      mask[j] = 1;
+      constraints[j].type = CONSTRAINT_NONE;
+      i += 2;
+      j++;
+      continue;
+    }
+
+    /* ?{...} -> constrained symbolic */
+    if (c == '?' && i + 1 < hex_size && hex_data[i + 1] == '{') {
+      dfile->contents[j] = 0;
+      mask[j] = 1;
+      int close = __parse_constraint(hex_data, hex_size,
+                                     i + 1, &constraints[j]);
+      if (close < 0)
+        klee_report_error(__FILE__, __LINE__,
+          "malformed constraint in hex template (missing '}' or unknown type)",
+          "user.err");
+      i = (unsigned)close + 1;  /* advance past '}' */
+      j++;
+      continue;
+    }
+
+    /* Should not reach here (caught in pass 1) */
+    klee_report_error(__FILE__, __LINE__,
+      "internal error in hex template parser", "user.err");
+  }
+
+  /* --- Make selected bytes symbolic --- */
+  klee_make_symbolic_bytes(dfile->contents, out_size, name, mask, out_size);
+
+  /* --- Apply constraints to symbolic bytes --- */
+  for (j = 0; j < out_size; j++) {
+    if (mask[j]) {
+      if (constraints[j].type != CONSTRAINT_NONE &&
+          constraints[j].type != CONSTRAINT_ANY)
+        __apply_byte_constraint(dfile->contents, j, &constraints[j]);
+      /* No prefer_cex for unconstrained hex bytes -- binary data
+         doesn't benefit from printable-ASCII preference */
+    }
+  }
+
+  free(mask);
+  free(constraints);
+
+  __setup_dfile_stat(dfile, name, defaults);
 }
+
+
 /* n_files: number of symbolic input files, excluding stdin
    file_length: size in bytes of each symbolic file, including stdin
    sym_stdout_flag: 1 if stdout should be symbolic, 0 otherwise
