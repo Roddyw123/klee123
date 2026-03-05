@@ -26,7 +26,7 @@ cd /tmp
 clang -emit-llvm -c -g -I /tmp/klee_src/include test_msb.c -o test_msb.bc
 klee test_msb.bc
 echo "--- Sample test case ---"
-ktest-tool /tmp/klee-out-0/test000001.ktest
+ktest-tool klee-last/test000001.ktest
 
 echo ""
 echo "========================================"
@@ -56,7 +56,7 @@ EOF
 clang -emit-llvm -c -g test_tpl.c -o test_tpl.bc
 klee --posix-runtime --libc=uclibc test_tpl.bc --sym-template-stdin /tmp/query.tpl
 echo "--- Sample test case ---"
-ktest-tool /tmp/klee-out-1/test000001.ktest
+ktest-tool klee-last/test000001.ktest
 
 echo ""
 echo "========================================"
@@ -87,7 +87,7 @@ EOF
 clang -emit-llvm -c -g test_digit.c -o test_digit.bc
 klee --posix-runtime --libc=uclibc test_digit.bc --sym-template-stdin /tmp/constraint_digit.tpl
 echo "--- Sample test case ---"
-ktest-tool /tmp/klee-out-2/test000001.ktest
+ktest-tool klee-last/test000001.ktest
 
 echo ""
 echo "========================================"
@@ -117,7 +117,7 @@ EOF
 clang -emit-llvm -c -g test_range.c -o test_range.bc
 klee --posix-runtime --libc=uclibc test_range.bc --sym-template-stdin /tmp/constraint_range.tpl
 echo "--- Sample test case ---"
-ktest-tool /tmp/klee-out-3/test000001.ktest
+ktest-tool klee-last/test000001.ktest
 
 echo ""
 echo "========================================"
@@ -148,7 +148,7 @@ EOF
 clang -emit-llvm -c -g test_set.c -o test_set.bc
 klee --posix-runtime --libc=uclibc test_set.bc --sym-template-stdin /tmp/constraint_set.tpl
 echo "--- Sample test case ---"
-ktest-tool /tmp/klee-out-4/test000001.ktest
+ktest-tool klee-last/test000001.ktest
 
 echo ""
 echo "========================================"
@@ -176,7 +176,7 @@ EOF
 clang -emit-llvm -c -g test_compat.c -o test_compat.bc
 klee --posix-runtime --libc=uclibc test_compat.bc --sym-template-stdin /tmp/compat.tpl
 echo "--- Sample test case ---"
-ktest-tool /tmp/klee-out-5/test000001.ktest
+ktest-tool klee-last/test000001.ktest
 
 echo ""
 echo "========================================"
@@ -209,7 +209,7 @@ EOF
 clang -emit-llvm -c -g test_hex_basic.c -o test_hex_basic.bc
 klee --posix-runtime --libc=uclibc test_hex_basic.bc --sym-hex-template-stdin /tmp/basic.btpl
 echo "--- Sample test case ---"
-ktest-tool /tmp/klee-out-6/test000001.ktest
+ktest-tool klee-last/test000001.ktest
 
 echo ""
 echo "========================================"
@@ -243,7 +243,7 @@ EOF
 clang -emit-llvm -c -g test_hex_constrained.c -o test_hex_constrained.bc
 klee --posix-runtime --libc=uclibc test_hex_constrained.bc --sym-hex-template-stdin /tmp/constrained.btpl
 echo "--- Sample test case ---"
-ktest-tool /tmp/klee-out-7/test000001.ktest
+ktest-tool klee-last/test000001.ktest
 
 echo ""
 echo "========================================"
@@ -280,7 +280,7 @@ EOF
 clang -emit-llvm -c -g test_hex_comments.c -o test_hex_comments.bc
 klee --posix-runtime --libc=uclibc test_hex_comments.bc --sym-hex-template-stdin /tmp/comments.btpl
 echo "--- Sample test case ---"
-ktest-tool /tmp/klee-out-8/test000001.ktest
+ktest-tool klee-last/test000001.ktest
 
 echo ""
 echo "========================================"
@@ -314,4 +314,4 @@ EOF
 clang -emit-llvm -c -g test_hex_binary.c -o test_hex_binary.bc
 klee --posix-runtime --libc=uclibc test_hex_binary.bc --sym-hex-template-stdin /tmp/binary.btpl
 echo "--- Sample test case ---"
-ktest-tool /tmp/klee-out-9/test000001.ktest
+ktest-tool klee-last/test000001.ktest
