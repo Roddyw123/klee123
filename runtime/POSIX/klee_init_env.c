@@ -124,7 +124,11 @@ usage: (klee_init_env) [options] [program arguments]\n\
   -sym-template-file <file>  - Use <file> as a template for a named\n\
                               symbolic file (A, B, C, ...). Repeatable.\n\
   -sym-marker <char>         - Set the template marker character\n\
-                              (default: '?').\n\n"
+                              (default: '?').\n\
+                              Template markers support constraints:\n\
+                              ?{alpha}, ?{digit}, ?{alnum}, ?{print},\n\
+                              ?{upper}, ?{lower}, ?{hex}, ?{space}, ?{any},\n\
+                              ?{range:X-Y}, ?{set:abc}\n\n"
 );
   }
 

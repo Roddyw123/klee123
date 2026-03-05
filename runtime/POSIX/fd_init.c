@@ -136,8 +136,149 @@ char *__read_concrete_file(const char *path, unsigned *out_size) {
   return buf;
 }
 
+/* --- Constraint Markers Language --- */
+#define CONSTRAINT_NONE   0
+#define CONSTRAINT_ALPHA  1
+#define CONSTRAINT_DIGIT  2
+#define CONSTRAINT_ALNUM  3
+#define CONSTRAINT_PRINT  4
+#define CONSTRAINT_UPPER  5
+#define CONSTRAINT_LOWER  6
+#define CONSTRAINT_HEX    7
+#define CONSTRAINT_RANGE  8
+#define CONSTRAINT_SET    9
+#define CONSTRAINT_SPACE 10
+#define CONSTRAINT_ANY   11
+
+typedef struct {
+  unsigned char type;       /* CONSTRAINT_* constant */
+  unsigned char range_lo;   /* for CONSTRAINT_RANGE: low bound (decimal) */
+  unsigned char range_hi;   /* for CONSTRAINT_RANGE: high bound (decimal) */
+  char set_chars[32];       /* for CONSTRAINT_SET: valid characters */
+  unsigned char set_len;    /* for CONSTRAINT_SET: number of valid chars */
+} byte_constraint_t;
+
+/* Parse a ?{...} constraint specifier.
+   template_data[start] must be the '{' after the marker.
+   Returns the index of '}', or -1 on parse error.
+   Fills *constraint with the parsed result. */
+static int __parse_constraint(const char *template_data,
+                              unsigned template_size,
+                              unsigned start,
+                              byte_constraint_t *constraint) {
+  unsigned end = start + 1;
+
+  /* Find closing '}' */
+  while (end < template_size && template_data[end] != '}')
+    end++;
+  if (end >= template_size)
+    return -1;  /* no closing brace */
+
+  const char *spec = template_data + start + 1;  /* skip '{' */
+  unsigned spec_len = end - start - 1;
+
+  constraint->type = CONSTRAINT_NONE;
+  constraint->set_len = 0;
+
+  if (spec_len == 5 && memcmp(spec, "alpha", 5) == 0) {
+    constraint->type = CONSTRAINT_ALPHA;
+  } else if (spec_len == 5 && memcmp(spec, "digit", 5) == 0) {
+    constraint->type = CONSTRAINT_DIGIT;
+  } else if (spec_len == 5 && memcmp(spec, "alnum", 5) == 0) {
+    constraint->type = CONSTRAINT_ALNUM;
+  } else if (spec_len == 5 && memcmp(spec, "print", 5) == 0) {
+    constraint->type = CONSTRAINT_PRINT;
+  } else if (spec_len == 5 && memcmp(spec, "upper", 5) == 0) {
+    constraint->type = CONSTRAINT_UPPER;
+  } else if (spec_len == 5 && memcmp(spec, "lower", 5) == 0) {
+    constraint->type = CONSTRAINT_LOWER;
+  } else if (spec_len == 5 && memcmp(spec, "space", 5) == 0) {
+    constraint->type = CONSTRAINT_SPACE;
+  } else if (spec_len == 3 && memcmp(spec, "hex", 3) == 0) {
+    constraint->type = CONSTRAINT_HEX;
+  } else if (spec_len == 3 && memcmp(spec, "any", 3) == 0) {
+    constraint->type = CONSTRAINT_ANY;
+  } else if (spec_len > 6 && memcmp(spec, "range:", 6) == 0) {
+    /* Parse range:X-Y where X and Y are decimal byte values (0-255) */
+    constraint->type = CONSTRAINT_RANGE;
+    unsigned lo = 0, hi = 0;
+    unsigned p = 6;
+    while (p < spec_len && spec[p] != '-')
+      lo = lo * 10 + (spec[p++] - '0');
+    if (p < spec_len) p++;  /* skip '-' */
+    while (p < spec_len)
+      hi = hi * 10 + (spec[p++] - '0');
+    constraint->range_lo = (unsigned char)lo;
+    constraint->range_hi = (unsigned char)hi;
+  } else if (spec_len > 4 && memcmp(spec, "set:", 4) == 0) {
+    /* Parse set:abc — each char after ':' is a valid value */
+    constraint->type = CONSTRAINT_SET;
+    constraint->set_len = spec_len - 4;
+    if (constraint->set_len > 32) constraint->set_len = 32;
+    memcpy(constraint->set_chars, spec + 4, constraint->set_len);
+  } else {
+    return -1;  /* unknown constraint */
+  }
+
+  return (int)end;  /* index of '}' */
+}
+
+/* Apply a constraint to a single symbolic byte via klee_assume.
+   contents[offset] must already be symbolic. */
+static void __apply_byte_constraint(char *contents, unsigned offset,
+                                    byte_constraint_t *c) {
+  switch (c->type) {
+    case CONSTRAINT_ALPHA:
+      klee_assume((contents[offset] >= 'A' && contents[offset] <= 'Z') ||
+                  (contents[offset] >= 'a' && contents[offset] <= 'z'));
+      break;
+    case CONSTRAINT_DIGIT:
+      klee_assume(contents[offset] >= '0' && contents[offset] <= '9');
+      break;
+    case CONSTRAINT_ALNUM:
+      klee_assume((contents[offset] >= 'A' && contents[offset] <= 'Z') ||
+                  (contents[offset] >= 'a' && contents[offset] <= 'z') ||
+                  (contents[offset] >= '0' && contents[offset] <= '9'));
+      break;
+    case CONSTRAINT_PRINT:
+      klee_assume(contents[offset] >= 32 && contents[offset] <= 126);
+      break;
+    case CONSTRAINT_UPPER:
+      klee_assume(contents[offset] >= 'A' && contents[offset] <= 'Z');
+      break;
+    case CONSTRAINT_LOWER:
+      klee_assume(contents[offset] >= 'a' && contents[offset] <= 'z');
+      break;
+    case CONSTRAINT_HEX:
+      klee_assume((contents[offset] >= '0' && contents[offset] <= '9') ||
+                  (contents[offset] >= 'a' && contents[offset] <= 'f') ||
+                  (contents[offset] >= 'A' && contents[offset] <= 'F'));
+      break;
+    case CONSTRAINT_SPACE:
+      klee_assume(contents[offset] == ' '  || contents[offset] == '\t' ||
+                  contents[offset] == '\n' || contents[offset] == '\r');
+      break;
+    case CONSTRAINT_RANGE:
+      klee_assume((unsigned char)contents[offset] >= c->range_lo);
+      klee_assume((unsigned char)contents[offset] <= c->range_hi);
+      break;
+    case CONSTRAINT_SET: {
+      int valid = 0;
+      unsigned ci;
+      for (ci = 0; ci < c->set_len; ci++)
+        valid = valid || (contents[offset] == c->set_chars[ci]);
+      klee_assume(valid);
+      break;
+    }
+    default:  /* CONSTRAINT_NONE, CONSTRAINT_ANY — no constraint */
+      break;
+  }
+}
+
 /* Parse a template and create a dfile with mixed concrete/symbolic content.
-   Every byte matching 'marker' becomes symbolic; all others stay concrete.
+   Marker char alone (e.g., '?') = unconstrained symbolic byte.
+   Marker followed by '{...}' (e.g., '?{digit}') = constrained symbolic byte.
+   All other characters = concrete bytes.
    Uses klee_make_symbolic_bytes (Objective 1.1). */
 void __create_mixed_dfile(exe_disk_file_t *dfile,
                           const char *template_data,
@@ -145,45 +286,91 @@ void __create_mixed_dfile(exe_disk_file_t *dfile,
                           const char *name,
                           char marker,
                           struct stat64 *defaults) {
-  unsigned i;
+  unsigned i, j, out_size;
 
   if (template_size == 0)
     klee_report_error(__FILE__, __LINE__, "template file is empty", "user.err");
 
-  /* --- Allocate contents and mask --- */
-  dfile->size = template_size;
-  dfile->contents = malloc(template_size);
+  /* --- Pass 1: compute output size ---
+     Each marker ('?') or marker+constraint ('?{digit}') produces 1 output byte.
+     Each non-marker character produces 1 output byte.
+     Input chars consumed per output byte varies, but each produces exactly 1. */
+  out_size = 0;
+  for (i = 0; i < template_size; i++) {
+    if (template_data[i] == marker) {
+      if (i + 1 < template_size && template_data[i + 1] == '{') {
+        /* Skip past closing '}' */
+        unsigned end = i + 2;
+        while (end < template_size && template_data[end] != '}') end++;
+        if (end < template_size) i = end;  /* loop's i++ will advance past '}' */
+      }
+      /* else: plain marker, consumes just 1 char (the loop's i++ handles it) */
+    }
+    out_size++;
+  }
+
+  /* --- Allocate contents, mask, and constraints --- */
+  dfile->size = out_size;
+  dfile->contents = malloc(out_size);
   if (!dfile->contents)
     klee_report_error(__FILE__, __LINE__, "out of memory in klee_init_env", "user.err");
 
-  unsigned char *mask = malloc(template_size);
+  unsigned char *mask = malloc(out_size);
   if (!mask)
     klee_report_error(__FILE__, __LINE__, "out of memory in klee_init_env", "user.err");
 
-  /* --- Build contents and mask in one pass --- */
+  byte_constraint_t *constraints = malloc(out_size * sizeof(byte_constraint_t));
+  if (!constraints)
+    klee_report_error(__FILE__, __LINE__, "out of memory in klee_init_env", "user.err");
+
+  /* --- Pass 2: fill contents, mask, and constraints --- */
+  j = 0;  /* output index */
   for (i = 0; i < template_size; i++) {
     if (template_data[i] == marker) {
-      dfile->contents[i] = 0;   /* placeholder; will become symbolic */
-      mask[i] = 1;
+      /* This is a symbolic byte */
+      dfile->contents[j] = 0;   /* placeholder */
+      mask[j] = 1;
+      constraints[j].type = CONSTRAINT_NONE;
+
+      if (i + 1 < template_size && template_data[i + 1] == '{') {
+        /* Parse constraint: ?{...} */
+        int close = __parse_constraint(template_data, template_size,
+                                       i + 1, &constraints[j]);
+        if (close < 0)
+          klee_report_error(__FILE__, __LINE__,
+                            "malformed constraint in template (missing '}' or unknown type)",
+                            "user.err");
+        i = (unsigned)close;  /* advance past '}'; loop's i++ handles next char */
+      }
+      /* else: plain '?' — unconstrained (CONSTRAINT_NONE already set) */
     } else {
-      dfile->contents[i] = template_data[i];  /* concrete byte */
-      mask[i] = 0;
+      /* Concrete byte */
+      dfile->contents[j] = template_data[i];
+      mask[j] = 0;
+      constraints[j].type = CONSTRAINT_NONE;
+    }
+    j++;
+  }
+
+  /* --- Make selected bytes symbolic --- */
+  klee_make_symbolic_bytes(dfile->contents, out_size, name, mask, out_size);
+
+  /* --- Apply constraints to symbolic bytes --- */
+  for (j = 0; j < out_size; j++) {
+    if (mask[j]) {
+      if (constraints[j].type != CONSTRAINT_NONE &&
+          constraints[j].type != CONSTRAINT_ANY)
+        __apply_byte_constraint(dfile->contents, j, &constraints[j]);
+      else
+        /* Unconstrained symbolic: prefer printable ASCII (soft hint) */
+        klee_posix_prefer_cex(dfile->contents,
+                              (32 <= dfile->contents[j] &&
+                               dfile->contents[j] <= 126));
     }
   }
 
-  /* --- Make selected bytes symbolic via Objective 1.1 intrinsic --- */
-  klee_make_symbolic_bytes(dfile->contents, template_size, name,
-                           mask, template_size);
-
-  /* --- Prefer printable ASCII for symbolic bytes --- */
-  for (i = 0; i < template_size; i++) {
-    if (mask[i])
-      klee_posix_prefer_cex(dfile->contents,
-                            (32 <= dfile->contents[i] &&
-                             dfile->contents[i] <= 126));
-  }
-
   free(mask);
+  free(constraints);
 
   /* --- Set up stat struct (same logic as __create_new_dfile) --- */
   struct stat64 *s = malloc(sizeof(*s));
