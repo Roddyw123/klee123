@@ -115,6 +115,11 @@ void __create_mixed_dfile(exe_disk_file_t *dfile,
                           const char *name,
                           char marker,
                           struct stat64 *defaults);
+void __create_hex_dfile(exe_disk_file_t *dfile,
+                        const char *hex_data,
+                        unsigned hex_size,
+                        const char *name,
+                        struct stat64 *defaults);
 
 /* *** */
 
