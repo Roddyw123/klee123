@@ -42,6 +42,8 @@ exe_sym_env_t __exe_env = {
   0
 };
 
+static void __setup_dfile_stat(exe_disk_file_t *dfile, const char *name, struct stat64 *defaults);
+
 static void __create_new_dfile(exe_disk_file_t *dfile, unsigned size,
                                const char *name, struct stat64 *defaults) {
   assert(size);
@@ -452,7 +454,7 @@ void __create_hex_dfile(exe_disk_file_t *dfile,
       }
       /* Bare '?' -- error */
       klee_report_error(__FILE__, __LINE__,
-        "bare '?' in hex template (use '??' for symbolic or '?{...}' for constrained)",
+        "bare '?' in hex template (use '?' '?' for symbolic or '?{...}' for constrained)",
         "user.err");
     }
 
