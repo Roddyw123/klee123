@@ -99,14 +99,18 @@ extern "C" {
    */
   uintptr_t klee_choose(uintptr_t n);
 
+  __attribute__((noreturn))
+  void klee_assert_fail(const char *expr, const char *file, unsigned line,
+                        const char *function);
+
   /* special klee assert macro. this assert should be used when path consistency
    * across platforms is desired (e.g., in tests).
-   * NB: __assert_fail is a klee "special" function
+   * NB: klee_assert_fail is a klee "special" function
    */
 # define klee_assert(expr)                                              \
   ((expr)                                                               \
    ? (void) (0)                                                         \
-   : __assert_fail (#expr, __FILE__, __LINE__, __PRETTY_FUNCTION__))    \
+   : klee_assert_fail (#expr, __FILE__, __LINE__, __PRETTY_FUNCTION__)) \
 
   /* Return true if the given value is symbolic (represented by an
    * expression) in the current state. This is primarily for debugging

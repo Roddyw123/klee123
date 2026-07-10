@@ -35,14 +35,62 @@ DISABLE_WARNING_POP
 using namespace llvm;
 
 namespace klee {
+namespace {
+
+// Extract the target pointer from a relative-table entry of the form
+// trunc(ptrtoint(target) - ptrtoint(table)).
+Constant *getRelativeTarget(Constant *entry, const GlobalVariable *table) {
+  auto *trunc = dyn_cast<ConstantExpr>(entry);
+  if (!trunc || trunc->getOpcode() != Instruction::Trunc)
+    return nullptr;
+  auto *sub = dyn_cast<ConstantExpr>(trunc->getOperand(0));
+  if (!sub || sub->getOpcode() != Instruction::Sub)
+    return nullptr;
+  auto *targetAsInt = dyn_cast<ConstantExpr>(sub->getOperand(0));
+  auto *baseAsInt = dyn_cast<ConstantExpr>(sub->getOperand(1));
+  if (!targetAsInt || targetAsInt->getOpcode() != Instruction::PtrToInt ||
+      !baseAsInt || baseAsInt->getOpcode() != Instruction::PtrToInt ||
+      baseAsInt->getOperand(0)->stripPointerCasts() != table)
+    return nullptr;
+  return cast<Constant>(targetAsInt->getOperand(0));
+}
+
+// Convert a constant i32 relative-offset table into an equivalent absolute
+// pointer table
+GlobalVariable *getAbsoluteRelativeTable(Module &M, GlobalVariable *table,
+                                         Type *pointerType) {
+  auto *initializer = dyn_cast_or_null<ConstantArray>(table->getInitializer());
+  if (!initializer ||
+      !initializer->getType()->getElementType()->isIntegerTy(32))
+    return nullptr;
+  std::string name = (table->getName() + ".klee_absolute").str();
+  if (auto *absoluteTable = M.getNamedGlobal(name))
+    return absoluteTable;
+  std::vector<Constant *> targets;
+  targets.reserve(initializer->getNumOperands());
+  for (Value *operand : initializer->operand_values()) {
+    Constant *target = getRelativeTarget(cast<Constant>(operand), table);
+    if (!target)
+      return nullptr;
+    targets.push_back(ConstantExpr::getPointerCast(target, pointerType));
+  }
+  auto *arrayType = ArrayType::get(pointerType, targets.size());
+  auto *absoluteTable = new GlobalVariable(
+      M, arrayType, true, GlobalValue::PrivateLinkage,
+      ConstantArray::get(arrayType, targets), name);
+  absoluteTable->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+  return absoluteTable;
+}
+
+} // namespace
 
 char IntrinsicCleanerPass::ID;
 
 bool IntrinsicCleanerPass::runOnModule(Module &M) {
   bool dirty = false;
-  for (auto &f: M) {
+  for (auto &f : M) {
     dirty |= runOnFunction(f);
-    for (auto &b: f)
+    for (auto &b : f)
       dirty |= runOnBasicBlock(b, M);
   }
 
@@ -124,14 +172,8 @@ bool IntrinsicCleanerPass::runOnBasicBlock(BasicBlock &b, Module &M) {
               Builder.CreatePointerCast(dst, i8pp, "vacopy.cast.dst");
           auto castedSrc =
               Builder.CreatePointerCast(src, i8pp, "vacopy.cast.src");
-#if LLVM_VERSION_CODE >= LLVM_VERSION(15, 0)
-          auto load = Builder.CreateLoad(Builder.getPtrTy(), castedSrc,
-                                         "vacopy.read");
-#else
           auto load =
-              Builder.CreateLoad(castedSrc->getType()->getPointerElementType(),
-                                 castedSrc, "vacopy.read");
-#endif
+              Builder.CreateLoad(Builder.getPtrTy(), castedSrc, "vacopy.read");
           Builder.CreateStore(load, castedDst, false /* isVolatile */);
         } else {
           assert(WordSize == 8 && "Invalid word size!");
@@ -139,13 +181,8 @@ bool IntrinsicCleanerPass::runOnBasicBlock(BasicBlock &b, Module &M) {
           auto pDst = Builder.CreatePointerCast(dst, i64p, "vacopy.cast.dst");
           auto pSrc = Builder.CreatePointerCast(src, i64p, "vacopy.cast.src");
 
-#if LLVM_VERSION_CODE >= LLVM_VERSION(15, 0)
           auto pSrcType = Builder.getPtrTy();
           auto pDstType = Builder.getPtrTy();
-#else
-          auto pSrcType = pSrc->getType()->getPointerElementType();
-          auto pDstType = pDst->getType()->getPointerElementType();
-#endif
           auto val = Builder.CreateLoad(pSrcType, pSrc);
           Builder.CreateStore(val, pDst, ii);
 
@@ -266,50 +303,54 @@ bool IntrinsicCleanerPass::runOnBasicBlock(BasicBlock &b, Module &M) {
         Value *overflow = nullptr;
         Value *result = nullptr;
         Value *saturated = nullptr;
-        switch(ii->getIntrinsicID()) {
-          case Intrinsic::usub_sat:
+        switch (ii->getIntrinsicID()) {
+        case Intrinsic::usub_sat:
+          result = builder.CreateSub(op1, op2);
+          overflow = builder.CreateICmpULT(op1, op2); // a < b  =>  a - b < 0
+          saturated = ConstantInt::get(ctx, APInt(bw, 0));
+          break;
+        case Intrinsic::uadd_sat:
+          result = builder.CreateAdd(op1, op2);
+          overflow = builder.CreateICmpULT(result, op1); // a + b < a
+          saturated = ConstantInt::get(ctx, APInt::getMaxValue(bw));
+          break;
+        case Intrinsic::ssub_sat:
+        case Intrinsic::sadd_sat: {
+          if (ii->getIntrinsicID() == Intrinsic::ssub_sat) {
             result = builder.CreateSub(op1, op2);
-            overflow = builder.CreateICmpULT(op1, op2); // a < b  =>  a - b < 0
-            saturated = ConstantInt::get(ctx, APInt(bw, 0));
-            break;
-          case Intrinsic::uadd_sat:
+          } else {
             result = builder.CreateAdd(op1, op2);
-            overflow = builder.CreateICmpULT(result, op1); // a + b < a
-            saturated = ConstantInt::get(ctx, APInt::getMaxValue(bw));
-            break;
-          case Intrinsic::ssub_sat:
-          case Intrinsic::sadd_sat: {
-            if (ii->getIntrinsicID() == Intrinsic::ssub_sat) {
-              result = builder.CreateSub(op1, op2);
-            } else {
-              result = builder.CreateAdd(op1, op2);
-            }
-            ConstantInt *zero = ConstantInt::get(ctx, APInt(bw, 0));
-            ConstantInt *smin = ConstantInt::get(ctx, APInt::getSignedMinValue(bw));
-            ConstantInt *smax = ConstantInt::get(ctx, APInt::getSignedMaxValue(bw));
-
-            Value *sign1 = builder.CreateICmpSLT(op1, zero);
-            Value *sign2 = builder.CreateICmpSLT(op2, zero);
-            Value *signR = builder.CreateICmpSLT(result, zero);
-
-            if (ii->getIntrinsicID() == Intrinsic::ssub_sat) {
-              saturated = builder.CreateSelect(sign2, smax, smin);
-            } else {
-              saturated = builder.CreateSelect(sign2, smin, smax);
-            }
-
-            // The sign of the result differs from the sign of the first operand
-            overflow = builder.CreateXor(sign1, signR);
-            if (ii->getIntrinsicID() == Intrinsic::ssub_sat) {
-              // AND the signs of the operands differ
-              overflow = builder.CreateAnd(overflow, builder.CreateXor(sign1, sign2));
-            } else {
-              // AND the signs of the operands are the same
-              overflow = builder.CreateAnd(overflow, builder.CreateNot(builder.CreateXor(sign1, sign2)));
-            }
-            break;
           }
-          default: ;
+          ConstantInt *zero = ConstantInt::get(ctx, APInt(bw, 0));
+          ConstantInt *smin =
+              ConstantInt::get(ctx, APInt::getSignedMinValue(bw));
+          ConstantInt *smax =
+              ConstantInt::get(ctx, APInt::getSignedMaxValue(bw));
+
+          Value *sign1 = builder.CreateICmpSLT(op1, zero);
+          Value *sign2 = builder.CreateICmpSLT(op2, zero);
+          Value *signR = builder.CreateICmpSLT(result, zero);
+
+          if (ii->getIntrinsicID() == Intrinsic::ssub_sat) {
+            saturated = builder.CreateSelect(sign2, smax, smin);
+          } else {
+            saturated = builder.CreateSelect(sign2, smin, smax);
+          }
+
+          // The sign of the result differs from the sign of the first operand
+          overflow = builder.CreateXor(sign1, signR);
+          if (ii->getIntrinsicID() == Intrinsic::ssub_sat) {
+            // AND the signs of the operands differ
+            overflow =
+                builder.CreateAnd(overflow, builder.CreateXor(sign1, sign2));
+          } else {
+            // AND the signs of the operands are the same
+            overflow = builder.CreateAnd(
+                overflow, builder.CreateNot(builder.CreateXor(sign1, sign2)));
+          }
+          break;
+        }
+        default:;
         }
 
         result = builder.CreateSelect(overflow, saturated, result);
@@ -334,15 +375,65 @@ bool IntrinsicCleanerPass::runOnBasicBlock(BasicBlock &b, Module &M) {
 
         i = ii->eraseFromParent();
 
-        // check if the instruction after the one we just replaced is not the
+        // Check if the instruction after the one we just replaced is not the
         // end of the basic block and if it is not (i.e. it is a valid
         // instruction), delete it and all remaining because the cleaner just
-        // introduced a terminating instruction (unreachable) otherwise llvm will
-        // assert in Verifier::visitTerminatorInstr
+        // introduced a terminating instruction (unreachable) otherwise llvm
+        // will assert in Verifier::visitTerminatorInstr
         while (i != ie) { // i was already incremented above.
           i = i->eraseFromParent();
         }
 
+        dirty = true;
+        break;
+      }
+      case Intrinsic::load_relative: {
+        llvm::IRBuilder<> Builder(ii);
+        Type *i8Ty = Type::getInt8Ty(ctx);
+        Type *i32Ty = Type::getInt32Ty(ctx);
+        Value *base = ii->getArgOperand(0);
+        Value *offset = ii->getArgOperand(1);
+        unsigned addressSpace = base->getType()->getPointerAddressSpace();
+
+        // Relative tables encode signed 32-bit link-time relocations. KLEE's
+        // deterministic allocator (KDAlloc) may place the table and its targets
+        // more than 2 GiB apart, so preserve the relocation by converting a
+        // static relative table to an absolute pointer table before execution.
+        if (auto *table = dyn_cast<GlobalVariable>(base->stripPointerCasts())) {
+          if (auto *absoluteTable =
+                  getAbsoluteRelativeTable(M, table, ii->getType())) {
+            Value *index = Builder.CreateUDiv(
+                offset, ConstantInt::get(offset->getType(), 4),
+                "load.relative.index");
+            Value *entry = Builder.CreateInBoundsGEP(
+                absoluteTable->getValueType(), absoluteTable,
+                {Builder.getInt32(0), index}, "load.relative.entry");
+            Value *result =
+                Builder.CreateLoad(ii->getType(), entry, "load.relative.result");
+            ii->replaceAllUsesWith(result);
+            ii->eraseFromParent();
+            dirty = true;
+            break;
+          }
+        }
+
+        Value *baseAsI8 = base;
+
+        Value *loadAddr =
+            Builder.CreateGEP(i8Ty, baseAsI8, offset, "load.relative.offset");
+
+        Value *relative =
+            Builder.CreateLoad(i32Ty, loadAddr, "load.relative.value");
+        Type *intptrTy = DataLayout.getIntPtrType(ctx, addressSpace);
+        Value *relativeExt =
+            Builder.CreateSExt(relative, intptrTy, "load.relative.sext");
+        Value *baseInt = Builder.CreatePtrToInt(base, intptrTy);
+        Value *resultInt =
+            Builder.CreateAdd(baseInt, relativeExt, "load.relative.result");
+        Value *result = Builder.CreateIntToPtr(resultInt, ii->getType());
+
+        ii->replaceAllUsesWith(result);
+        ii->eraseFromParent();
         dirty = true;
         break;
       }
@@ -356,7 +447,8 @@ bool IntrinsicCleanerPass::runOnBasicBlock(BasicBlock &b, Module &M) {
         break;
       }
       case Intrinsic::is_constant: {
-        if(auto* constant = llvm::ConstantFoldInstruction(ii, ii->getModule()->getDataLayout()))
+        if (auto *constant = llvm::ConstantFoldInstruction(
+                ii, ii->getModule()->getDataLayout()))
           ii->replaceAllUsesWith(constant);
         else
           ii->replaceAllUsesWith(ConstantInt::getFalse(ii->getType()));
@@ -364,6 +456,22 @@ bool IntrinsicCleanerPass::runOnBasicBlock(BasicBlock &b, Module &M) {
         dirty = true;
         break;
       }
+
+#if LLVM_VERSION_CODE >= LLVM_VERSION(17, 0)
+      case Intrinsic::ptrmask: {
+        IRBuilder<> builder(ii);
+        Value *ptr = ii->getArgOperand(0);
+        Value *mask = ii->getArgOperand(1);
+        Type *maskType = mask->getType();
+        Value *ptrAsInt = builder.CreatePtrToInt(ptr, maskType);
+        Value *maskedPtr = builder.CreateAnd(ptrAsInt, mask);
+        Value *replacement = builder.CreateIntToPtr(maskedPtr, ii->getType());
+        ii->replaceAllUsesWith(replacement);
+        ii->eraseFromParent();
+        dirty = true;
+        break;
+      }
+#endif
 
       // The following intrinsics are currently handled by LowerIntrinsicCall
       // (Invoking LowerIntrinsicCall with any intrinsics not on this
@@ -435,7 +543,8 @@ bool IntrinsicCleanerPass::runOnBasicBlock(BasicBlock &b, Module &M) {
       default: {
         const Function *Callee = ii->getCalledFunction();
         llvm::StringRef name = Callee->getName();
-        klee_warning_once((void*)Callee, "unsupported intrinsic %.*s", (int)name.size(), name.data());
+        klee_warning_once((void *)Callee, "unsupported intrinsic %.*s",
+                          (int)name.size(), name.data());
         break;
       }
       }

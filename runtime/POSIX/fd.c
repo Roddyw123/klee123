@@ -252,9 +252,9 @@ int utimes(const char *path, const struct timeval times[2]) {
   exe_disk_file_t *dfile = __get_sym_file(path);
 
   if (dfile) {
+    struct timeval newTimes[2];
 
     if (!times) {
-      struct timeval newTimes[2];
       gettimeofday(&(newTimes[0]), NULL);
       newTimes[1] = newTimes[0];
       times = newTimes;
@@ -376,6 +376,12 @@ ssize_t read(int fd, void *buf, size_t count) {
     return r;
   }
   else {
+
+    if (!(f->flags & eReadable)) {
+      errno = EBADF;
+      return -1;
+    }
+
     assert(f->off >= 0);
     if (((off64_t)f->dfile->size) < f->off)
       return 0;
@@ -435,6 +441,12 @@ ssize_t write(int fd, const void *buf, size_t count) {
     return r;
   }
   else {
+
+    if (!(f->flags & eWriteable)) {
+      errno = EBADF;
+      return -1;
+    }
+
     /* symbolic file */    
     size_t actual_count = 0;
     if (f->off + count <= f->dfile->size)

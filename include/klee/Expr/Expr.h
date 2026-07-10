@@ -117,8 +117,6 @@ public:
   
 
   enum Kind {
-    InvalidKind = -1,
-
     // Primitive
 
     Constant = 0,
@@ -511,11 +509,8 @@ public:
 private:
   unsigned hashValue;
 
-  // FIXME: Make =delete when we switch to C++11
-  Array(const Array& array);
-
-  // FIXME: Make =delete when we switch to C++11
-  Array& operator =(const Array& array);
+  Array(const Array& array) = delete;
+  Array& operator=(const Array& array) = delete;
 
   ~Array();
 
@@ -1117,13 +1112,7 @@ public:
   }
 
   /// isAllOnes - Is this constant all ones.
-  bool isAllOnes() const {
-#if LLVM_VERSION_CODE <= LLVM_VERSION(13, 0)
-    return getAPValue().isAllOnesValue();
-#else
-    return getAPValue().isAllOnes();
-#endif
-  }
+  bool isAllOnes() const { return getAPValue().isAllOnes(); }
 
   /* Constant Operations */
 
